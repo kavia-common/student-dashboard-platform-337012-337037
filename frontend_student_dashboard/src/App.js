@@ -25,7 +25,7 @@ const SECTIONS = [
   { key: "assignments", label: "Assignments", desc: "Due dates & status", icon: "✅" },
   { key: "grades", label: "Grades", desc: "Scores & progress", icon: "📈" },
   { key: "analytics", label: "Analytics", desc: "Trends & insights", icon: "🧠" },
-  { key: "calendar", label: "Calendar", desc: "Upcoming events", icon: "🗓️" },
+  { key: "calendar", label: "Calendar", desc: "Month view & events", icon: "🗓️" },
   { key: "notifications", label: "Notifications", desc: "Updates & reminders", icon: "🔔" },
 ];
 
@@ -177,6 +177,15 @@ function App() {
       });
       return { ...prev, assignments: next };
     });
+  };
+
+  // PUBLIC_INTERFACE
+  const addCalendarEvent = (event) => {
+    /** Adds a calendar event to the dashboard state (and persists if enabled). */
+    setData((prev) => ({
+      ...prev,
+      calendarEvents: [event, ...prev.calendarEvents],
+    }));
   };
 
   // PUBLIC_INTERFACE
@@ -521,7 +530,12 @@ function App() {
             ) : null}
 
             {activeSection === "calendar" ? (
-              <CalendarPanel events={filteredEvents} classesById={classesById} />
+              <CalendarPanel
+                events={filteredEvents}
+                classes={data.classes}
+                classesById={classesById}
+                onCreateEvent={addCalendarEvent}
+              />
             ) : null}
 
             {activeSection === "notifications" ? (
@@ -696,7 +710,9 @@ function AnalyticsPanel({ profile, analytics, grades, classesById }) {
                 <div className="kpiValue">
                   {analytics.assignmentsCompletedWeekly.reduce((a, b) => a + b.value, 0)}
                 </div>
-                <div className="muted">Δ {countDeltaText(analytics.assignmentsDelta.delta)} this week</div>
+                <div className="muted">
+                  Δ {countDeltaText(analytics.assignmentsDelta.delta)} this week
+                </div>
               </div>
               <div className="kpi">
                 <div className="kpiLabel">Grades posted</div>
@@ -1026,17 +1042,48 @@ function GradesPanel({ grades, classesById }) {
   );
 }
 
-function CalendarPanel({ events, classesById }) {
-  // Create a tiny "week view" grid (today + next 6 days).
-  const days = useMemo(() => {
-    const base = new Date();
-    base.setHours(0, 0, 0, 0);
-    return Array.from({ length: 7 }).map((_, i) => {
-      const d = new Date(base);
-      d.setDate(d.getDate() + i);
+function CalendarPanel({ events, classes, classesById, onCreateEvent }) {
+  const todayKey = useMemo(() => {
+    const t = new Date();
+    t.setHours(0, 0, 0, 0);
+    return t.toISOString().slice(0, 10);
+  }, []);
+
+  const [viewMonth, setViewMonth] = useState(() => {
+    const d = new Date();
+    d.setDate(1);
+    d.setHours(0, 0, 0, 0);
+    return d;
+  });
+
+  const [selectedDayKey, setSelectedDayKey] = useState(null);
+  const [createOpen, setCreateOpen] = useState(false);
+
+  const monthLabel = useMemo(
+    () =>
+      viewMonth.toLocaleDateString(undefined, {
+        month: "long",
+        year: "numeric",
+      }),
+    [viewMonth]
+  );
+
+  const monthDays = useMemo(() => {
+    // Build a 6-week grid starting on Sunday.
+    const first = new Date(viewMonth);
+    first.setDate(1);
+    first.setHours(0, 0, 0, 0);
+
+    const start = new Date(first);
+    start.setDate(first.getDate() - first.getDay()); // Sunday before/at first day
+
+    return Array.from({ length: 42 }).map((_, i) => {
+      const d = new Date(start);
+      d.setDate(start.getDate() + i);
+      d.setHours(0, 0, 0, 0);
       return d;
     });
-  }, []);
+  }, [viewMonth]);
 
   const eventsByDayKey = useMemo(() => {
     const map = new Map();
@@ -1054,86 +1101,440 @@ function CalendarPanel({ events, classesById }) {
     return map;
   }, [events]);
 
+  const selectedDayEvents = useMemo(() => {
+    if (!selectedDayKey) return [];
+    return eventsByDayKey.get(selectedDayKey) ?? [];
+  }, [eventsByDayKey, selectedDayKey]);
+
+  const openCreateForDay = (dayKey) => {
+    setSelectedDayKey(dayKey);
+    setCreateOpen(true);
+  };
+
+  const onPrevMonth = () => {
+    setViewMonth((prev) => {
+      const d = new Date(prev);
+      d.setMonth(d.getMonth() - 1);
+      d.setDate(1);
+      return d;
+    });
+  };
+
+  const onNextMonth = () => {
+    setViewMonth((prev) => {
+      const d = new Date(prev);
+      d.setMonth(d.getMonth() + 1);
+      d.setDate(1);
+      return d;
+    });
+  };
+
+  const onGoToday = () => {
+    const d = new Date();
+    d.setDate(1);
+    d.setHours(0, 0, 0, 0);
+    setViewMonth(d);
+    setSelectedDayKey(todayKey);
+  };
+
+  // PUBLIC_INTERFACE
+  const submitNewEvent = (draft) => {
+    /** Convert the event draft to the persisted data shape and add it to dashboard state. */
+    const safeId =
+      (typeof crypto !== "undefined" && crypto.randomUUID && crypto.randomUUID()) ||
+      `e_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+
+    onCreateEvent({
+      id: safeId,
+      type: draft.type,
+      title: draft.title,
+      at: draft.at,
+      classId: draft.classId || null,
+    });
+
+    setCreateOpen(false);
+  };
+
+  const weekdayLabels = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+  const monthIndex = viewMonth.getMonth();
+  const year = viewMonth.getFullYear();
+
+  const upcomingInMonth = useMemo(() => {
+    // Keep the list useful: show month events and upcoming beyond month too, but cap it.
+    const start = new Date(year, monthIndex, 1);
+    const end = new Date(year, monthIndex + 1, 1);
+    return events
+      .filter((e) => {
+        const d = new Date(e.at);
+        return d >= start && d < end;
+      })
+      .sort((a, b) => new Date(a.at) - new Date(b.at));
+  }, [events, monthIndex, year]);
+
   return (
     <div className="grid">
       <div className="card">
         <div className="cardHeader">
           <div>
             <h2>Calendar</h2>
-            <p>Week view (today + 6 days)</p>
+            <p>Month view (click a day to see events, double click to create)</p>
           </div>
-          <span className="pill">{events.length} matching events</span>
+          <div className="rowActions" style={{ alignItems: "center" }}>
+            <button className="btn" onClick={onPrevMonth} aria-label="Previous month">
+              ←
+            </button>
+            <span className="pill" aria-label="Current month">
+              {monthLabel}
+            </span>
+            <button className="btn" onClick={onNextMonth} aria-label="Next month">
+              →
+            </button>
+            <button className="btn btnPrimary" onClick={onGoToday} aria-label="Go to today">
+              Today
+            </button>
+          </div>
         </div>
+
         <div className="cardBody">
-          <div className="calendarGrid" aria-label="Calendar week grid">
-            {days.map((d) => {
+          <div className="calendarMonthGrid" aria-label="Calendar month grid">
+            {weekdayLabels.map((w) => (
+              <div key={w} className="calendarMonthHeaderCell" aria-hidden="true">
+                {w}
+              </div>
+            ))}
+
+            {monthDays.map((d) => {
               const key = d.toISOString().slice(0, 10);
+              const inMonth = d.getMonth() === monthIndex;
               const dayEvents = eventsByDayKey.get(key) ?? [];
+              const isToday = key === todayKey;
+              const isSelected = selectedDayKey === key;
+
               return (
-                <div className="calendarCell" key={key}>
-                  <div className="calendarCellHeader">
-                    <span>{d.toLocaleDateString(undefined, { weekday: "short" })}</span>
-                    <span>{d.getDate()}</span>
+                <button
+                  key={key}
+                  type="button"
+                  className={`calendarMonthCell ${
+                    inMonth ? "" : "calendarMonthCellMuted"
+                  } ${isToday ? "calendarMonthCellToday" : ""} ${
+                    isSelected ? "calendarMonthCellSelected" : ""
+                  }`}
+                  onClick={() => setSelectedDayKey(key)}
+                  onDoubleClick={() => openCreateForDay(key)}
+                  aria-label={`${
+                    inMonth ? "" : "Not in month, "
+                  }${d.toLocaleDateString(undefined, {
+                    weekday: "long",
+                    month: "short",
+                    day: "numeric",
+                  })}. ${dayEvents.length} events.`}
+                >
+                  <div className="calendarMonthCellTop">
+                    <span className="calendarMonthDayNum">{d.getDate()}</span>
+                    {dayEvents.length > 0 ? (
+                      <span className="pill" style={{ padding: "4px 8px" }}>
+                        {dayEvents.length}
+                      </span>
+                    ) : (
+                      <span className="muted" style={{ fontSize: 12 }}>
+                        —
+                      </span>
+                    )}
                   </div>
 
-                  {dayEvents.length === 0 ? (
-                    <div className="muted" style={{ marginTop: 8 }}>
-                      No events
-                    </div>
-                  ) : (
-                    <div className="list" style={{ marginTop: 8, gap: 8 }}>
-                      {dayEvents.slice(0, 3).map((e) => {
-                        const cls = e.classId ? classesById.get(e.classId) : null;
-                        return (
-                          <div key={e.id} className="pill" title={formatDateTime(e.at)}>
-                            <span className="calendarDot" aria-hidden="true" />
-                            {e.type}: {e.title}
-                            {cls ? <span className="muted"> · {cls.code}</span> : null}
-                          </div>
-                        );
-                      })}
-                      {dayEvents.length > 3 ? (
-                        <div className="muted">+{dayEvents.length - 3} more</div>
-                      ) : null}
-                    </div>
-                  )}
-                </div>
+                  <div className="calendarMonthCellEvents" aria-hidden="true">
+                    {dayEvents.slice(0, 2).map((e) => (
+                      <div key={e.id} className="calendarMonthEventChip" title={e.title}>
+                        <span className="calendarDot" aria-hidden="true" />
+                        <span className="calendarMonthEventText">{e.title}</span>
+                      </div>
+                    ))}
+                    {dayEvents.length > 2 ? (
+                      <div className="calendarMonthMore muted">+{dayEvents.length - 2} more</div>
+                    ) : null}
+                  </div>
+                </button>
               );
             })}
+          </div>
+
+          <div className="calendarBottomRow">
+            <div className="card" style={{ background: "rgba(255,255,255,0.70)" }}>
+              <div className="cardHeader">
+                <div>
+                  <h2>Day details</h2>
+                  <p>
+                    {selectedDayKey
+                      ? new Date(selectedDayKey).toLocaleDateString(undefined, {
+                          weekday: "long",
+                          month: "long",
+                          day: "numeric",
+                          year: "numeric",
+                        })
+                      : "Select a day"}
+                  </p>
+                </div>
+                <div className="rowActions">
+                  <button
+                    className="btn btnPrimary"
+                    onClick={() => openCreateForDay(selectedDayKey ?? todayKey)}
+                    aria-label="Create event"
+                  >
+                    + New event
+                  </button>
+                </div>
+              </div>
+
+              <div className="cardBody">
+                {!selectedDayKey ? (
+                  <div className="emptyState">
+                    Click any day in the grid to see events. Double-click a day to create a new
+                    event on that date.
+                  </div>
+                ) : selectedDayEvents.length === 0 ? (
+                  <div className="emptyState">
+                    No events on this day. Create one to start planning.
+                  </div>
+                ) : (
+                  <div className="list" aria-label="Selected day events list">
+                    {selectedDayEvents.map((e) => {
+                      const cls = e.classId ? classesById.get(e.classId) : null;
+                      return (
+                        <div key={e.id} className="listItem">
+                          <div>
+                            <strong>{e.title}</strong>
+                            <p>
+                              {e.type} · {formatDateTime(e.at)}
+                              {cls ? ` · ${cls.code}` : ""}
+                            </p>
+                          </div>
+                          <span className="pill pillBlue">{e.type}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="card" style={{ background: "rgba(255,255,255,0.70)" }}>
+              <div className="cardHeader">
+                <div>
+                  <h2>This month</h2>
+                  <p>Events occurring in {monthLabel}</p>
+                </div>
+                <span className="pill">{upcomingInMonth.length} events</span>
+              </div>
+              <div className="cardBody">
+                {upcomingInMonth.length === 0 ? (
+                  <div className="emptyState">No events in this month (for current filters).</div>
+                ) : (
+                  <div className="list" aria-label="Month events list">
+                    {upcomingInMonth.slice(0, 10).map((e) => {
+                      const cls = e.classId ? classesById.get(e.classId) : null;
+                      return (
+                        <div
+                          key={e.id}
+                          className="pill"
+                          title={formatDateTime(e.at)}
+                          style={{ display: "inline-flex", width: "fit-content" }}
+                        >
+                          <span className="calendarDot" aria-hidden="true" />
+                          {formatShortDate(e.at)} · {e.type}: {e.title}
+                          {cls ? <span className="muted"> · {cls.code}</span> : null}
+                        </div>
+                      );
+                    })}
+                    {upcomingInMonth.length > 10 ? (
+                      <div className="muted">+{upcomingInMonth.length - 10} more</div>
+                    ) : null}
+                  </div>
+                )}
+
+                <div className="muted" style={{ marginTop: 10 }}>
+                  Note: Creating events updates the dashboard state. If “Persist” is On, events are
+                  saved to localStorage and will remain after refresh.
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       </div>
 
-      <div className="card">
-        <div className="cardHeader">
+      {createOpen ? (
+        <CreateEventModal
+          initialDayKey={selectedDayKey ?? todayKey}
+          classes={classes}
+          onCancel={() => setCreateOpen(false)}
+          onSubmit={submitNewEvent}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+function CreateEventModal({ initialDayKey, classes, onCancel, onSubmit }) {
+  const [title, setTitle] = useState("");
+  const [type, setType] = useState("Study Session");
+  const [classId, setClassId] = useState("");
+  const [time, setTime] = useState("09:00"); // HH:mm
+  const [error, setError] = useState("");
+
+  const initialDate = useMemo(() => {
+    const d = new Date(initialDayKey);
+    if (!Number.isFinite(d.getTime())) {
+      const t = new Date();
+      t.setHours(0, 0, 0, 0);
+      return t.toISOString().slice(0, 10);
+    }
+    return d.toISOString().slice(0, 10);
+  }, [initialDayKey]);
+
+  const [date, setDate] = useState(initialDate);
+
+  useEffect(() => {
+    // Reset error when user edits.
+    if (error) setError("");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [title, type, classId, time, date]);
+
+  const createAtIso = () => {
+    // Interpret the chosen date+time in the user's local timezone.
+    const [hh, mm] = String(time).split(":").map((x) => Number(x));
+    const d = new Date(date);
+    d.setHours(Number.isFinite(hh) ? hh : 9, Number.isFinite(mm) ? mm : 0, 0, 0);
+    return d.toISOString();
+  };
+
+  const submit = (e) => {
+    e.preventDefault();
+
+    const t = String(title || "").trim();
+    if (t.length < 2) {
+      setError("Please provide a short event title.");
+      return;
+    }
+
+    const at = createAtIso();
+    if (!Number.isFinite(new Date(at).getTime())) {
+      setError("Please select a valid date/time.");
+      return;
+    }
+
+    onSubmit({
+      title: t,
+      type,
+      classId: classId || null,
+      at,
+    });
+  };
+
+  return (
+    <div className="modalOverlay" role="dialog" aria-modal="true" aria-label="Create event modal">
+      <div className="modalCard">
+        <div className="modalHeader">
           <div>
-            <h2>Upcoming (list)</h2>
-            <p>All matching events ordered by time</p>
+            <h3 style={{ margin: 0, fontSize: 14 }}>Create event</h3>
+            <p style={{ margin: "6px 0 0 0" }} className="muted">
+              Add an event to your calendar. Double-click any day to open this quickly.
+            </p>
           </div>
+          <button className="btn" onClick={onCancel} aria-label="Close create event modal">
+            ✕
+          </button>
         </div>
-        <div className="cardBody">
-          {events.length === 0 ? (
-            <div className="emptyState">No upcoming events match your filters.</div>
-          ) : (
-            <div className="list" aria-label="Upcoming events list">
-              {events.map((e) => {
-                const cls = e.classId ? classesById.get(e.classId) : null;
-                return (
-                  <div key={e.id} className="listItem">
-                    <div>
-                      <strong>{e.title}</strong>
-                      <p>
-                        {e.type} · {formatDateTime(e.at)}
-                        {cls ? ` · ${cls.code}` : ""}
-                      </p>
-                    </div>
-                    <span className="pill pillBlue">{e.type}</span>
-                  </div>
-                );
-              })}
+
+        <form onSubmit={submit} className="modalBody">
+          <div className="grid2">
+            <label className="modalField">
+              <span className="muted">Title</span>
+              <input
+                className="input"
+                value={title}
+                onChange={(e) => setTitle(e.target.value)}
+                placeholder="e.g., CS 240 study block"
+                aria-label="Event title"
+                autoFocus
+              />
+            </label>
+
+            <label className="modalField">
+              <span className="muted">Type</span>
+              <select
+                className="select"
+                value={type}
+                onChange={(e) => setType(e.target.value)}
+                aria-label="Event type"
+              >
+                <option>Class</option>
+                <option>Office Hours</option>
+                <option>Assignment Due</option>
+                <option>Study Session</option>
+                <option>Exam</option>
+                <option>Personal</option>
+              </select>
+            </label>
+          </div>
+
+          <div className="grid2" style={{ marginTop: 10 }}>
+            <label className="modalField">
+              <span className="muted">Date</span>
+              <input
+                className="input"
+                type="date"
+                value={date}
+                onChange={(e) => setDate(e.target.value)}
+                aria-label="Event date"
+              />
+            </label>
+
+            <label className="modalField">
+              <span className="muted">Time</span>
+              <input
+                className="input"
+                type="time"
+                value={time}
+                onChange={(e) => setTime(e.target.value)}
+                aria-label="Event time"
+              />
+            </label>
+          </div>
+
+          <div style={{ marginTop: 10 }}>
+            <label className="modalField">
+              <span className="muted">Class (optional)</span>
+              <select
+                className="select"
+                value={classId}
+                onChange={(e) => setClassId(e.target.value)}
+                aria-label="Event class association"
+              >
+                <option value="">None</option>
+                {classes.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.code} · {c.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+
+          {error ? (
+            <div className="emptyState" style={{ marginTop: 10, borderColor: "rgba(239,68,68,0.35)" }}>
+              {error}
             </div>
-          )}
-        </div>
+          ) : null}
+
+          <div className="modalActions">
+            <button type="button" className="btn" onClick={onCancel} aria-label="Cancel create event">
+              Cancel
+            </button>
+            <button type="submit" className="btn btnPrimary" aria-label="Save event">
+              Save event
+            </button>
+          </div>
+        </form>
       </div>
     </div>
   );
