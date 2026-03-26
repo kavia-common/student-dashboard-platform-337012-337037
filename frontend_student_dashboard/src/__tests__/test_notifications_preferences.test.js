@@ -63,7 +63,9 @@ describe("Notifications preferences/categories", () => {
     await user.click(inAppToggle);
     expect(inAppToggle).not.toBeChecked();
 
-    // The UI also reflects On/Off in the pill label next to it.
-    expect(screen.getByText(/^off$/i)).toBeInTheDocument();
+    // The UI also reflects On/Off in the pill label next to the specific toggle.
+    const inAppLabel = inAppToggle.closest("label");
+    expect(inAppLabel).toBeTruthy();
+    expect(within(inAppLabel).getByText(/^off$/i)).toBeInTheDocument();
   });
 });
