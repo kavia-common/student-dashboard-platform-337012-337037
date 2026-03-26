@@ -9,6 +9,13 @@ import {
   formatShortDate,
   includesQuery,
 } from "./utils/dashboard";
+import {
+  buildNumericTrendSeries,
+  buildWeeklySeriesFromDates,
+  calcGpaFromGradePercents,
+  calcTrendDelta,
+} from "./utils/analytics";
+import Sparkline from "./components/Sparkline";
 
 const STORAGE_KEY = "dashboard_state_v1";
 
@@ -17,6 +24,7 @@ const SECTIONS = [
   { key: "classes", label: "Classes", desc: "Schedule & instructors", icon: "📚" },
   { key: "assignments", label: "Assignments", desc: "Due dates & status", icon: "✅" },
   { key: "grades", label: "Grades", desc: "Scores & progress", icon: "📈" },
+  { key: "analytics", label: "Analytics", desc: "Trends & insights", icon: "🧠" },
   { key: "calendar", label: "Calendar", desc: "Upcoming events", icon: "🗓️" },
   { key: "notifications", label: "Notifications", desc: "Updates & reminders", icon: "🔔" },
 ];
@@ -203,15 +211,90 @@ function App() {
   }, [data.assignments, data.grades, data.calendarEvents]);
 
   const classOptions = useMemo(
-    () => [{ id: "all", label: "All classes" }].concat(
-      data.classes.map((c) => ({ id: c.id, label: `${c.code} · ${c.name}` }))
-    ),
+    () =>
+      [{ id: "all", label: "All classes" }].concat(
+        data.classes.map((c) => ({ id: c.id, label: `${c.code} · ${c.name}` }))
+      ),
     [data.classes]
   );
 
+  // --- Analytics (mock-derived) ---
+  const analytics = useMemo(() => {
+    const gradePercents = data.grades
+      .map((g) => calcGradePercent(g.score, g.outOf))
+      .filter((p) => Number.isFinite(p));
+
+    // Use provided profile.gpa as "current", but compute an estimate from grades for insight.
+    const gpaEstimate = calcGpaFromGradePercents(gradePercents);
+
+    // A mock "GPA history" series: blend historical grade snapshots into a gently varying line.
+    // Oldest -> newest, 8 points.
+    const gpaHistoryValues = (() => {
+      const base = Number(data.profile?.gpa ?? 0) || 0;
+      const est = gpaEstimate || base || 0;
+
+      // Deterministic pseudo-variation using grade percents (no randomness).
+      const seed = gradePercents.reduce((a, b) => a + b, 0) || 1;
+      const wobble = (i) => (((seed * (i + 3)) % 11) - 5) / 100; // [-0.05..0.05]
+      const blend = (t) => base * (1 - t) + est * t;
+
+      return Array.from({ length: 8 }).map((_, i) => {
+        const t = i / 7;
+        const v = blend(t) + wobble(i);
+        return Math.max(0, Math.min(4, Number(v.toFixed(2))));
+      });
+    })();
+
+    const gpaSeries = buildNumericTrendSeries(
+      gpaHistoryValues,
+      ["8w", "7w", "6w", "5w", "4w", "3w", "2w", "Now"]
+    );
+    const gpaDelta = calcTrendDelta(gpaSeries);
+
+    const assignmentsCompletedWeekly = buildWeeklySeriesFromDates(
+      data.assignments.filter((a) => a.status === "Submitted"),
+      (a) => a.dueDate,
+      { weeks: 8 }
+    );
+    const assignmentsDelta = calcTrendDelta(assignmentsCompletedWeekly);
+
+    const gradesPostedWeekly = buildWeeklySeriesFromDates(
+      data.grades,
+      (g) => g.date,
+      { weeks: 8 }
+    );
+    const gradesDelta = calcTrendDelta(gradesPostedWeekly);
+
+    const notificationsWeekly = buildWeeklySeriesFromDates(
+      data.notifications,
+      (n) => n.time,
+      { weeks: 8 }
+    );
+    const notifDelta = calcTrendDelta(notificationsWeekly);
+
+    const currentGpa = Number(data.profile?.gpa ?? 0) || 0;
+
+    return {
+      currentGpa,
+      gpaEstimate,
+      gpaSeries,
+      gpaDelta,
+      assignmentsCompletedWeekly,
+      assignmentsDelta,
+      gradesPostedWeekly,
+      gradesDelta,
+      notificationsWeekly,
+      notifDelta,
+      gradePercents,
+    };
+  }, [data.profile, data.assignments, data.grades, data.notifications]);
+
   return (
     <div className="appShell">
-      <aside className={`sidebar ${sidebarOpen ? "sidebarOpen" : ""}`} aria-label="Sidebar navigation">
+      <aside
+        className={`sidebar ${sidebarOpen ? "sidebarOpen" : ""}`}
+        aria-label="Sidebar navigation"
+      >
         <div className="sidebarCard">
           <div className="brand" aria-label="App brand">
             <div className="brandMark" aria-hidden="true" />
@@ -232,7 +315,9 @@ function App() {
                 }}
                 aria-current={activeSection === s.key ? "page" : undefined}
               >
-                <span className="navIcon" aria-hidden="true">{s.icon}</span>
+                <span className="navIcon" aria-hidden="true">
+                  {s.icon}
+                </span>
                 <span className="navText">
                   <strong>
                     {s.label}{" "}
@@ -285,7 +370,9 @@ function App() {
 
           <div className="headerRight">
             <div className="searchWrap" role="search">
-              <span className="searchIcon" aria-hidden="true">⌕</span>
+              <span className="searchIcon" aria-hidden="true">
+                ⌕
+              </span>
               <input
                 className="searchInput"
                 value={query}
@@ -408,13 +495,9 @@ function App() {
               </div>
             ) : null}
 
-            {activeSection === "profile" ? (
-              <ProfilePanel profile={data.profile} />
-            ) : null}
+            {activeSection === "profile" ? <ProfilePanel profile={data.profile} /> : null}
 
-            {activeSection === "classes" ? (
-              <ClassesPanel classes={filteredClasses} />
-            ) : null}
+            {activeSection === "classes" ? <ClassesPanel classes={filteredClasses} /> : null}
 
             {activeSection === "assignments" ? (
               <AssignmentsPanel
@@ -426,6 +509,15 @@ function App() {
 
             {activeSection === "grades" ? (
               <GradesPanel grades={filteredGrades} classesById={classesById} />
+            ) : null}
+
+            {activeSection === "analytics" ? (
+              <AnalyticsPanel
+                profile={data.profile}
+                analytics={analytics}
+                grades={filteredGrades}
+                classesById={classesById}
+              />
             ) : null}
 
             {activeSection === "calendar" ? (
@@ -461,7 +553,9 @@ function ProfilePanel({ profile }) {
             <div className="listItem">
               <div>
                 <strong>{profile.name}</strong>
-                <p>{profile.program} · {profile.year}</p>
+                <p>
+                  {profile.program} · {profile.year}
+                </p>
               </div>
               <span className="pill">ID: {profile.id}</span>
             </div>
@@ -495,6 +589,254 @@ function ProfilePanel({ profile }) {
           <div className="emptyState">
             This dashboard uses mock data. Use the sidebar to navigate, search globally from
             the header, and filter per section.
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AnalyticsPanel({ profile, analytics, grades, classesById }) {
+  const gpaPillClass =
+    analytics.gpaDelta.direction === "up"
+      ? "pillGreen"
+      : analytics.gpaDelta.direction === "down"
+      ? "pillAmber"
+      : "pillBlue";
+
+  const deltaText = (d, suffix = "") =>
+    `${d > 0 ? "+" : ""}${Number(d).toFixed(2)}${suffix}`;
+
+  const countDeltaText = (d) => `${d > 0 ? "+" : ""}${d}`;
+
+  const gradeAverage = useMemo(() => {
+    if (!analytics.gradePercents.length) return 0;
+    const sum = analytics.gradePercents.reduce((a, b) => a + b, 0);
+    return Math.round(sum / analytics.gradePercents.length);
+  }, [analytics.gradePercents]);
+
+  return (
+    <div className="grid">
+      <div className="grid2">
+        <div className="card">
+          <div className="cardHeader">
+            <div>
+              <h2>GPA</h2>
+              <p>Current + 8-week trend (mock-derived)</p>
+            </div>
+            <span className={`pill ${gpaPillClass}`}>
+              {analytics.gpaDelta.direction === "flat"
+                ? "Stable"
+                : analytics.gpaDelta.direction === "up"
+                ? "Trending up"
+                : "Trending down"}
+            </span>
+          </div>
+          <div className="cardBody">
+            <div className="analyticsTop">
+              <div className="analyticsStat">
+                <div className="kpiLabel">Current</div>
+                <div className="analyticsValue">{analytics.currentGpa.toFixed(2)}</div>
+                <div className="muted">From profile</div>
+              </div>
+              <div className="analyticsStat">
+                <div className="kpiLabel">Estimate</div>
+                <div className="analyticsValue">{analytics.gpaEstimate.toFixed(2)}</div>
+                <div className="muted">From recent grades</div>
+              </div>
+              <div className="analyticsStat">
+                <div className="kpiLabel">Δ week</div>
+                <div className="analyticsValue">
+                  {deltaText(analytics.gpaDelta.delta, "")}
+                </div>
+                <div className="muted">Last point vs prior</div>
+              </div>
+            </div>
+
+            <div className="sparkWrap">
+              <Sparkline
+                series={analytics.gpaSeries}
+                ariaLabel="GPA 8-week trend chart"
+                stroke="var(--primary)"
+                fill="rgba(59,130,246,0.10)"
+              />
+              <div className="sparkAxis" aria-hidden="true">
+                <span>8 weeks ago</span>
+                <span>Now</span>
+              </div>
+            </div>
+
+            <div className="analyticsNote">
+              <span className="pill">Goal</span>
+              <span className="muted">
+                Keep above <strong>{Math.max(3.5, Number(profile.gpa ?? 0)).toFixed(2)}</strong>{" "}
+                while maintaining workload balance.
+              </span>
+            </div>
+          </div>
+        </div>
+
+        <div className="card">
+          <div className="cardHeader">
+            <div>
+              <h2>Performance snapshot</h2>
+              <p>Grades, completion, and updates</p>
+            </div>
+            <span className="pill pillBlue">Last 8 weeks</span>
+          </div>
+          <div className="cardBody">
+            <div className="kpiRow kpiRowCompact" aria-label="Analytics KPIs">
+              <div className="kpi">
+                <div className="kpiLabel">Avg score</div>
+                <div className="kpiValue">{gradeAverage}%</div>
+                <div className="muted">Based on shown grades</div>
+              </div>
+              <div className="kpi">
+                <div className="kpiLabel">Assignments completed</div>
+                <div className="kpiValue">
+                  {analytics.assignmentsCompletedWeekly.reduce((a, b) => a + b.value, 0)}
+                </div>
+                <div className="muted">Δ {countDeltaText(analytics.assignmentsDelta.delta)} this week</div>
+              </div>
+              <div className="kpi">
+                <div className="kpiLabel">Grades posted</div>
+                <div className="kpiValue">
+                  {analytics.gradesPostedWeekly.reduce((a, b) => a + b.value, 0)}
+                </div>
+                <div className="muted">Δ {countDeltaText(analytics.gradesDelta.delta)} this week</div>
+              </div>
+              <div className="kpi">
+                <div className="kpiLabel">Notifications</div>
+                <div className="kpiValue">
+                  {analytics.notificationsWeekly.reduce((a, b) => a + b.value, 0)}
+                </div>
+                <div className="muted">Δ {countDeltaText(analytics.notifDelta.delta)} this week</div>
+              </div>
+            </div>
+
+            <div className="grid3" style={{ marginTop: 14 }}>
+              <TrendCard
+                title="Completion"
+                subtitle="Assignments submitted / week"
+                series={analytics.assignmentsCompletedWeekly}
+                stroke="var(--success)"
+                fill="rgba(16,185,129,0.10)"
+              />
+              <TrendCard
+                title="Grades"
+                subtitle="Graded items posted / week"
+                series={analytics.gradesPostedWeekly}
+                stroke="var(--primary-2)"
+                fill="rgba(6,182,212,0.10)"
+              />
+              <TrendCard
+                title="Activity"
+                subtitle="Notifications / week"
+                series={analytics.notificationsWeekly}
+                stroke="var(--warning)"
+                fill="rgba(245,158,11,0.10)"
+              />
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="card">
+        <div className="cardHeader">
+          <div>
+            <h2>Recent grades (context)</h2>
+            <p>Matches the active class filter</p>
+          </div>
+          <span className="pill">{grades.length} items</span>
+        </div>
+        <div className="cardBody">
+          {grades.length === 0 ? (
+            <div className="emptyState">No grades available for the current filter.</div>
+          ) : (
+            <table className="table" aria-label="Recent grades table (analytics)">
+              <thead>
+                <tr>
+                  <th>Item</th>
+                  <th>Class</th>
+                  <th>Date</th>
+                  <th>Score</th>
+                  <th>Percent</th>
+                </tr>
+              </thead>
+              <tbody>
+                {grades.slice(0, 6).map((g) => {
+                  const cls = classesById.get(g.classId);
+                  const pct = calcGradePercent(g.score, g.outOf);
+                  return (
+                    <tr key={g.id}>
+                      <td>
+                        <strong>{g.item}</strong>
+                      </td>
+                      <td>
+                        <span className="pill">{cls?.code ?? "—"}</span>
+                      </td>
+                      <td>{formatShortDate(g.date)}</td>
+                      <td>
+                        {g.score} / {g.outOf}
+                      </td>
+                      <td>
+                        <span
+                          className={`pill ${
+                            pct >= 90
+                              ? "pillGreen"
+                              : pct >= 75
+                              ? "pillBlue"
+                              : pct >= 60
+                              ? "pillAmber"
+                              : "pillRed"
+                          }`}
+                        >
+                          {pct}%
+                        </span>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          )}
+          <div className="muted" style={{ marginTop: 10 }}>
+            Note: Trends are derived from mock data timestamps. With persistence enabled, toggling
+            assignment status can affect completion counts over time.
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function TrendCard({ title, subtitle, series, stroke, fill }) {
+  const { delta, direction } = calcTrendDelta(series);
+  const pillClass =
+    direction === "up" ? "pillGreen" : direction === "down" ? "pillAmber" : "pillBlue";
+
+  return (
+    <div className="card" style={{ background: "rgba(255,255,255,0.70)" }}>
+      <div className="cardHeader">
+        <div>
+          <h2>{title}</h2>
+          <p>{subtitle}</p>
+        </div>
+        <span className={`pill ${pillClass}`}>
+          {direction === "flat" ? "0" : delta > 0 ? `+${delta}` : `${delta}`} vs last week
+        </span>
+      </div>
+      <div className="cardBody">
+        <div className="sparkWrap">
+          <Sparkline
+            series={series}
+            ariaLabel={`${title} trend chart`}
+            stroke={stroke}
+            fill={fill}
+          />
+          <div className="sparkAxis" aria-hidden="true">
+            <span>Oldest</span>
+            <span>Newest</span>
           </div>
         </div>
       </div>
@@ -647,12 +989,28 @@ function GradesPanel({ grades, classesById }) {
                   const pct = calcGradePercent(g.score, g.outOf);
                   return (
                     <tr key={g.id}>
-                      <td><strong>{g.item}</strong></td>
-                      <td><span className="pill">{cls?.code ?? "—"}</span></td>
-                      <td>{formatShortDate(g.date)}</td>
-                      <td>{g.score} / {g.outOf}</td>
                       <td>
-                        <span className={`pill ${pct >= 90 ? "pillGreen" : pct >= 75 ? "pillBlue" : pct >= 60 ? "pillAmber" : "pillRed"}`}>
+                        <strong>{g.item}</strong>
+                      </td>
+                      <td>
+                        <span className="pill">{cls?.code ?? "—"}</span>
+                      </td>
+                      <td>{formatShortDate(g.date)}</td>
+                      <td>
+                        {g.score} / {g.outOf}
+                      </td>
+                      <td>
+                        <span
+                          className={`pill ${
+                            pct >= 90
+                              ? "pillGreen"
+                              : pct >= 75
+                              ? "pillBlue"
+                              : pct >= 60
+                              ? "pillAmber"
+                              : "pillRed"
+                          }`}
+                        >
                           {pct}%
                         </span>
                       </td>
@@ -714,9 +1072,7 @@ function CalendarPanel({ events, classesById }) {
               return (
                 <div className="calendarCell" key={key}>
                   <div className="calendarCellHeader">
-                    <span>
-                      {d.toLocaleDateString(undefined, { weekday: "short" })}
-                    </span>
+                    <span>{d.toLocaleDateString(undefined, { weekday: "short" })}</span>
                     <span>{d.getDate()}</span>
                   </div>
 
