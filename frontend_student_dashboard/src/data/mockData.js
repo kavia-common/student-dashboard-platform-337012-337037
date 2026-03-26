@@ -72,5 +72,27 @@ export function getDefaultDashboardData() {
     grades,
     calendarEvents,
     notifications,
+
+    // Notification preferences (used by Notifications section).
+    // Stored alongside dashboard state so it can be persisted via the existing localStorage pattern.
+    notificationPreferences: {
+      categories: {
+        assignments: true,
+        grades: true,
+        classes: true,
+        calendar: true,
+        system: true,
+      },
+      channels: {
+        inApp: true,
+        email: false,
+        sms: false,
+      },
+      quietHours: {
+        enabled: false,
+        start: "22:00",
+        end: "07:00",
+      },
+    },
   };
 }

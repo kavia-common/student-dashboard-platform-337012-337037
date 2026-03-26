@@ -26,8 +26,57 @@ const SECTIONS = [
   { key: "grades", label: "Grades", desc: "Scores & progress", icon: "📈" },
   { key: "analytics", label: "Analytics", desc: "Trends & insights", icon: "🧠" },
   { key: "calendar", label: "Calendar", desc: "Month view & events", icon: "🗓️" },
-  { key: "notifications", label: "Notifications", desc: "Updates & reminders", icon: "🔔" },
+  {
+    key: "notifications",
+    label: "Notifications",
+    desc: "Updates, reminders & preferences",
+    icon: "🔔",
+  },
 ];
+
+// Notification categories used by the dashboard.
+// (Mock notifications use "kind"; we normalize it into these category keys.)
+const NOTIFICATION_CATEGORIES = [
+  { key: "assignments", label: "Assignments", desc: "Due dates and reminders" },
+  { key: "grades", label: "Grades", desc: "New grades and feedback" },
+  { key: "classes", label: "Classes", desc: "Schedule and room changes" },
+  { key: "calendar", label: "Calendar", desc: "Events and study blocks" },
+  { key: "system", label: "System", desc: "Product updates and account messages" },
+];
+
+const DEFAULT_NOTIFICATION_PREFERENCES = {
+  // Per-category "enabled" toggles
+  categories: {
+    assignments: true,
+    grades: true,
+    classes: true,
+    calendar: true,
+    system: true,
+  },
+
+  // Channels (UI only; no real push/email integration in this mock dashboard)
+  channels: {
+    inApp: true,
+    email: false,
+    sms: false,
+  },
+
+  // Optional "quiet hours" (UI-only behavior: used to show status and example gating)
+  quietHours: {
+    enabled: false,
+    start: "22:00",
+    end: "07:00",
+  },
+};
+
+function normalizeNotificationCategory(kind) {
+  const k = String(kind ?? "").trim().toLowerCase();
+  if (k.includes("assign")) return "assignments";
+  if (k.includes("grade")) return "grades";
+  if (k.includes("class")) return "classes";
+  if (k.includes("calendar")) return "calendar";
+  return "system";
+}
 
 // PUBLIC_INTERFACE
 function App() {
@@ -42,14 +91,43 @@ function App() {
 
   const [data, setData] = useState(() => {
     const fallback = getDefaultDashboardData();
-    if (!loadFromStorage("persist_enabled", true)) return fallback;
-    return loadFromStorage(STORAGE_KEY, fallback);
+    const withPrefs = {
+      ...fallback,
+      notificationPreferences: DEFAULT_NOTIFICATION_PREFERENCES,
+    };
+
+    if (!loadFromStorage("persist_enabled", true)) return withPrefs;
+
+    // Back-compat: older persisted states won't include preferences
+    const loaded = loadFromStorage(STORAGE_KEY, withPrefs);
+    return {
+      ...withPrefs,
+      ...loaded,
+      notificationPreferences: {
+        ...DEFAULT_NOTIFICATION_PREFERENCES,
+        ...(loaded?.notificationPreferences ?? {}),
+        categories: {
+          ...DEFAULT_NOTIFICATION_PREFERENCES.categories,
+          ...(loaded?.notificationPreferences?.categories ?? {}),
+        },
+        channels: {
+          ...DEFAULT_NOTIFICATION_PREFERENCES.channels,
+          ...(loaded?.notificationPreferences?.channels ?? {}),
+        },
+        quietHours: {
+          ...DEFAULT_NOTIFICATION_PREFERENCES.quietHours,
+          ...(loaded?.notificationPreferences?.quietHours ?? {}),
+        },
+      },
+    };
   });
 
   const [query, setQuery] = useState("");
   const [classFilter, setClassFilter] = useState("all");
   const [assignmentStatusFilter, setAssignmentStatusFilter] = useState("all");
   const [notificationFilter, setNotificationFilter] = useState("all"); // all|unread|read
+  const [notificationCategoryFilter, setNotificationCategoryFilter] =
+    useState("all"); // all|assignments|grades|classes|calendar|system
 
   // Persist preference and data if enabled.
   useEffect(() => {
@@ -141,8 +219,17 @@ function App() {
       .sort((a, b) => new Date(a.at) - new Date(b.at));
   }, [data.calendarEvents, classFilter, query, classesById]);
 
+  const preferences = data.notificationPreferences ?? DEFAULT_NOTIFICATION_PREFERENCES;
+
   const filteredNotifications = useMemo(() => {
     return data.notifications
+      .map((n) => ({
+        ...n,
+        _category: normalizeNotificationCategory(n.kind),
+      }))
+      // Apply preferences first (category enabled)
+      .filter((n) => Boolean(preferences?.categories?.[n._category] ?? true))
+      // Apply view filter
       .filter((n) =>
         notificationFilter === "all"
           ? true
@@ -150,9 +237,35 @@ function App() {
           ? !n.read
           : n.read
       )
+      // Apply category filter dropdown
+      .filter((n) =>
+        notificationCategoryFilter === "all"
+          ? true
+          : n._category === notificationCategoryFilter
+      )
+      // Global search
       .filter((n) => includesQuery(n.title, query) || includesQuery(n.body, query))
       .sort((a, b) => new Date(b.time) - new Date(a.time));
-  }, [data.notifications, notificationFilter, query]);
+  }, [
+    data.notifications,
+    notificationFilter,
+    notificationCategoryFilter,
+    query,
+    preferences,
+  ]);
+
+  const categoryCounts = useMemo(() => {
+    const counts = {};
+    for (const c of NOTIFICATION_CATEGORIES) counts[c.key] = { total: 0, unread: 0 };
+
+    for (const n of data.notifications) {
+      const cat = normalizeNotificationCategory(n.kind);
+      if (!counts[cat]) counts[cat] = { total: 0, unread: 0 };
+      counts[cat].total += 1;
+      if (!n.read) counts[cat].unread += 1;
+    }
+    return counts;
+  }, [data.notifications]);
 
   // PUBLIC_INTERFACE
   const markNotificationRead = (id, read) => {
@@ -232,8 +345,40 @@ function App() {
   const resetToMockData = () => {
     /** Resets dashboard state to default mock data (and clears persisted state). */
     const fresh = getDefaultDashboardData();
-    setData(fresh);
-    saveToStorage(STORAGE_KEY, fresh);
+    const withPrefs = {
+      ...fresh,
+      notificationPreferences: DEFAULT_NOTIFICATION_PREFERENCES,
+    };
+    setData(withPrefs);
+    saveToStorage(STORAGE_KEY, withPrefs);
+  };
+
+  // PUBLIC_INTERFACE
+  const updateNotificationPreferences = (patch) => {
+    /** Update notification preferences (categories/channels/quietHours). */
+    setData((prev) => {
+      const current = prev.notificationPreferences ?? DEFAULT_NOTIFICATION_PREFERENCES;
+      const next = {
+        ...current,
+        ...patch,
+        categories: {
+          ...DEFAULT_NOTIFICATION_PREFERENCES.categories,
+          ...(current?.categories ?? {}),
+          ...(patch?.categories ?? {}),
+        },
+        channels: {
+          ...DEFAULT_NOTIFICATION_PREFERENCES.channels,
+          ...(current?.channels ?? {}),
+          ...(patch?.channels ?? {}),
+        },
+        quietHours: {
+          ...DEFAULT_NOTIFICATION_PREFERENCES.quietHours,
+          ...(current?.quietHours ?? {}),
+          ...(patch?.quietHours ?? {}),
+        },
+      };
+      return { ...prev, notificationPreferences: next };
+    });
   };
 
   const closeSidebarOnNav = () => setSidebarOpen(false);
@@ -533,6 +678,24 @@ function App() {
                           <option value="unread">Unread</option>
                           <option value="read">Read</option>
                         </select>
+
+                        <label className="muted" htmlFor="notifCategoryFilter">
+                          Category
+                        </label>
+                        <select
+                          id="notifCategoryFilter"
+                          className="select"
+                          value={notificationCategoryFilter}
+                          onChange={(e) => setNotificationCategoryFilter(e.target.value)}
+                          aria-label="Notification category filter"
+                        >
+                          <option value="all">All categories</option>
+                          {NOTIFICATION_CATEGORIES.map((c) => (
+                            <option key={c.key} value={c.key}>
+                              {c.label}
+                            </option>
+                          ))}
+                        </select>
                       </>
                     ) : null}
 
@@ -585,7 +748,11 @@ function App() {
             {activeSection === "notifications" ? (
               <NotificationsPanel
                 notifications={filteredNotifications}
+                preferences={preferences}
+                categories={NOTIFICATION_CATEGORIES}
+                categoryCounts={categoryCounts}
                 onMarkRead={markNotificationRead}
+                onUpdatePreferences={updateNotificationPreferences}
               />
             ) : null}
           </section>
@@ -704,9 +871,7 @@ function AnalyticsPanel({ profile, analytics, grades, classesById }) {
               </div>
               <div className="analyticsStat">
                 <div className="kpiLabel">Δ week</div>
-                <div className="analyticsValue">
-                  {deltaText(analytics.gpaDelta.delta, "")}
-                </div>
+                <div className="analyticsValue">{deltaText(analytics.gpaDelta.delta, "")}</div>
                 <div className="muted">Last point vs prior</div>
               </div>
             </div>
@@ -754,9 +919,7 @@ function AnalyticsPanel({ profile, analytics, grades, classesById }) {
                 <div className="kpiValue">
                   {analytics.assignmentsCompletedWeekly.reduce((a, b) => a + b.value, 0)}
                 </div>
-                <div className="muted">
-                  Δ {countDeltaText(analytics.assignmentsDelta.delta)} this week
-                </div>
+                <div className="muted">Δ {countDeltaText(analytics.assignmentsDelta.delta)} this week</div>
               </div>
               <div className="kpi">
                 <div className="kpiLabel">Grades posted</div>
@@ -888,12 +1051,7 @@ function TrendCard({ title, subtitle, series, stroke, fill }) {
       </div>
       <div className="cardBody">
         <div className="sparkWrap">
-          <Sparkline
-            series={series}
-            ariaLabel={`${title} trend chart`}
-            stroke={stroke}
-            fill={fill}
-          />
+          <Sparkline series={series} ariaLabel={`${title} trend chart`} stroke={stroke} fill={fill} />
           <div className="sparkAxis" aria-hidden="true">
             <span>Oldest</span>
             <span>Newest</span>
@@ -1010,9 +1168,7 @@ function AssignmentsPanel({
       </div>
       <div className="cardBody">
         {assignments.length === 0 ? (
-          <div className="emptyState">
-            No assignments match your filters. Create one to get started.
-          </div>
+          <div className="emptyState">No assignments match your filters. Create one to get started.</div>
         ) : (
           <table className="table" aria-label="Assignments table">
             <thead>
@@ -1043,18 +1199,10 @@ function AssignmentsPanel({
                     </td>
                     <td>
                       <div className="rowActions">
-                        <button
-                          className="btn"
-                          onClick={() => openEdit(a)}
-                          aria-label={`Edit assignment ${a.title}`}
-                        >
+                        <button className="btn" onClick={() => openEdit(a)} aria-label={`Edit assignment ${a.title}`}>
                           Edit
                         </button>
-                        <button
-                          className="btn btnPrimary"
-                          onClick={() => onToggleStatus(a.id)}
-                          aria-label={`Toggle status for ${a.title}`}
-                        >
+                        <button className="btn btnPrimary" onClick={() => onToggleStatus(a.id)} aria-label={`Toggle status for ${a.title}`}>
                           Toggle status
                         </button>
                       </div>
@@ -1067,8 +1215,7 @@ function AssignmentsPanel({
         )}
 
         <div className="muted" style={{ marginTop: 10 }}>
-          Note: Creating/editing assignments updates dashboard state. If “Persist” is On, changes are
-          saved to localStorage and will remain after refresh.
+          Note: Creating/editing assignments updates dashboard state. If “Persist” is On, changes are saved to localStorage and will remain after refresh.
         </div>
       </div>
 
@@ -1089,9 +1236,6 @@ function AssignmentEditorModal({ assignment, classes, onCancel, onSubmit, onDele
   const isEdit = Boolean(assignment);
 
   const initial = useMemo(() => {
-    const now = new Date();
-    now.setMinutes(0, 0, 0);
-
     const fallbackDue = (() => {
       const d = new Date();
       d.setDate(d.getDate() + 3);
@@ -1164,22 +1308,13 @@ function AssignmentEditorModal({ assignment, classes, onCancel, onSubmit, onDele
   };
 
   return (
-    <div
-      className="modalOverlay"
-      role="dialog"
-      aria-modal="true"
-      aria-label={isEdit ? "Edit assignment modal" : "Create assignment modal"}
-    >
+    <div className="modalOverlay" role="dialog" aria-modal="true" aria-label={isEdit ? "Edit assignment modal" : "Create assignment modal"}>
       <div className="modalCard">
         <div className="modalHeader">
           <div>
-            <h3 style={{ margin: 0, fontSize: 14 }}>
-              {isEdit ? "Edit assignment" : "Create assignment"}
-            </h3>
+            <h3 style={{ margin: 0, fontSize: 14 }}>{isEdit ? "Edit assignment" : "Create assignment"}</h3>
             <p style={{ margin: "6px 0 0 0" }} className="muted">
-              {isEdit
-                ? "Update assignment details. Changes apply immediately."
-                : "Add a new assignment to your dashboard."}
+              {isEdit ? "Update assignment details. Changes apply immediately." : "Add a new assignment to your dashboard."}
             </p>
           </div>
           <button className="btn" onClick={onCancel} aria-label="Close assignment editor modal">
@@ -1203,12 +1338,7 @@ function AssignmentEditorModal({ assignment, classes, onCancel, onSubmit, onDele
 
             <label className="modalField">
               <span className="muted">Class</span>
-              <select
-                className="select"
-                value={classId}
-                onChange={(e) => setClassId(e.target.value)}
-                aria-label="Assignment class"
-              >
+              <select className="select" value={classId} onChange={(e) => setClassId(e.target.value)} aria-label="Assignment class">
                 {classes.map((c) => (
                   <option key={c.id} value={c.id}>
                     {c.code} · {c.name}
@@ -1221,36 +1351,19 @@ function AssignmentEditorModal({ assignment, classes, onCancel, onSubmit, onDele
           <div className="grid2" style={{ marginTop: 10 }}>
             <label className="modalField">
               <span className="muted">Due date</span>
-              <input
-                className="input"
-                type="date"
-                value={date}
-                onChange={(e) => setDate(e.target.value)}
-                aria-label="Assignment due date"
-              />
+              <input className="input" type="date" value={date} onChange={(e) => setDate(e.target.value)} aria-label="Assignment due date" />
             </label>
 
             <label className="modalField">
               <span className="muted">Due time</span>
-              <input
-                className="input"
-                type="time"
-                value={time}
-                onChange={(e) => setTime(e.target.value)}
-                aria-label="Assignment due time"
-              />
+              <input className="input" type="time" value={time} onChange={(e) => setTime(e.target.value)} aria-label="Assignment due time" />
             </label>
           </div>
 
           <div className="grid2" style={{ marginTop: 10 }}>
             <label className="modalField">
               <span className="muted">Status</span>
-              <select
-                className="select"
-                value={status}
-                onChange={(e) => setStatus(e.target.value)}
-                aria-label="Assignment status"
-              >
+              <select className="select" value={status} onChange={(e) => setStatus(e.target.value)} aria-label="Assignment status">
                 <option>Not Started</option>
                 <option>In Progress</option>
                 <option>Submitted</option>
@@ -1259,23 +1372,12 @@ function AssignmentEditorModal({ assignment, classes, onCancel, onSubmit, onDele
 
             <label className="modalField">
               <span className="muted">Points</span>
-              <input
-                className="input"
-                type="number"
-                min="1"
-                step="1"
-                value={points}
-                onChange={(e) => setPoints(e.target.value)}
-                aria-label="Assignment points"
-              />
+              <input className="input" type="number" min="1" step="1" value={points} onChange={(e) => setPoints(e.target.value)} aria-label="Assignment points" />
             </label>
           </div>
 
           {error ? (
-            <div
-              className="emptyState"
-              style={{ marginTop: 10, borderColor: "rgba(239,68,68,0.35)" }}
-            >
+            <div className="emptyState" style={{ marginTop: 10, borderColor: "rgba(239,68,68,0.35)" }}>
               {error}
             </div>
           ) : null}
@@ -1299,12 +1401,7 @@ function AssignmentEditorModal({ assignment, classes, onCancel, onSubmit, onDele
             </div>
 
             <div style={{ display: "flex", gap: 10 }}>
-              <button
-                type="button"
-                className="btn"
-                onClick={onCancel}
-                aria-label="Cancel assignment editor"
-              >
+              <button type="button" className="btn" onClick={onCancel} aria-label="Cancel assignment editor">
                 Cancel
               </button>
               <button type="submit" className="btn btnPrimary" aria-label="Save assignment">
@@ -1565,11 +1662,9 @@ function CalendarPanel({ events, classes, classesById, onCreateEvent }) {
                 <button
                   key={key}
                   type="button"
-                  className={`calendarMonthCell ${
-                    inMonth ? "" : "calendarMonthCellMuted"
-                  } ${isToday ? "calendarMonthCellToday" : ""} ${
-                    isSelected ? "calendarMonthCellSelected" : ""
-                  }`}
+                  className={`calendarMonthCell ${inMonth ? "" : "calendarMonthCellMuted"} ${
+                    isToday ? "calendarMonthCellToday" : ""
+                  } ${isSelected ? "calendarMonthCellSelected" : ""}`}
                   onClick={() => setSelectedDayKey(key)}
                   onDoubleClick={() => openCreateForDay(key)}
                   aria-label={`${
@@ -1639,13 +1734,10 @@ function CalendarPanel({ events, classes, classesById, onCreateEvent }) {
               <div className="cardBody">
                 {!selectedDayKey ? (
                   <div className="emptyState">
-                    Click any day in the grid to see events. Double-click a day to create a new
-                    event on that date.
+                    Click any day in the grid to see events. Double-click a day to create a new event on that date.
                   </div>
                 ) : selectedDayEvents.length === 0 ? (
-                  <div className="emptyState">
-                    No events on this day. Create one to start planning.
-                  </div>
+                  <div className="emptyState">No events on this day. Create one to start planning.</div>
                 ) : (
                   <div className="list" aria-label="Selected day events list">
                     {selectedDayEvents.map((e) => {
@@ -1703,8 +1795,7 @@ function CalendarPanel({ events, classes, classesById, onCreateEvent }) {
                 )}
 
                 <div className="muted" style={{ marginTop: 10 }}>
-                  Note: Creating events updates the dashboard state. If “Persist” is On, events are
-                  saved to localStorage and will remain after refresh.
+                  Note: Creating events updates the dashboard state. If “Persist” is On, events are saved to localStorage and will remain after refresh.
                 </div>
               </div>
             </div>
@@ -1811,12 +1902,7 @@ function CreateEventModal({ initialDayKey, classes, onCancel, onSubmit }) {
 
             <label className="modalField">
               <span className="muted">Type</span>
-              <select
-                className="select"
-                value={type}
-                onChange={(e) => setType(e.target.value)}
-                aria-label="Event type"
-              >
+              <select className="select" value={type} onChange={(e) => setType(e.target.value)} aria-label="Event type">
                 <option>Class</option>
                 <option>Office Hours</option>
                 <option>Assignment Due</option>
@@ -1830,36 +1916,19 @@ function CreateEventModal({ initialDayKey, classes, onCancel, onSubmit }) {
           <div className="grid2" style={{ marginTop: 10 }}>
             <label className="modalField">
               <span className="muted">Date</span>
-              <input
-                className="input"
-                type="date"
-                value={date}
-                onChange={(e) => setDate(e.target.value)}
-                aria-label="Event date"
-              />
+              <input className="input" type="date" value={date} onChange={(e) => setDate(e.target.value)} aria-label="Event date" />
             </label>
 
             <label className="modalField">
               <span className="muted">Time</span>
-              <input
-                className="input"
-                type="time"
-                value={time}
-                onChange={(e) => setTime(e.target.value)}
-                aria-label="Event time"
-              />
+              <input className="input" type="time" value={time} onChange={(e) => setTime(e.target.value)} aria-label="Event time" />
             </label>
           </div>
 
           <div style={{ marginTop: 10 }}>
             <label className="modalField">
               <span className="muted">Class (optional)</span>
-              <select
-                className="select"
-                value={classId}
-                onChange={(e) => setClassId(e.target.value)}
-                aria-label="Event class association"
-              >
+              <select className="select" value={classId} onChange={(e) => setClassId(e.target.value)} aria-label="Event class association">
                 <option value="">None</option>
                 {classes.map((c) => (
                   <option key={c.id} value={c.id}>
@@ -1890,61 +1959,342 @@ function CreateEventModal({ initialDayKey, classes, onCancel, onSubmit }) {
   );
 }
 
-function NotificationsPanel({ notifications, onMarkRead }) {
+function NotificationsPanel({
+  notifications,
+  preferences,
+  categories,
+  categoryCounts,
+  onMarkRead,
+  onUpdatePreferences,
+}) {
   const unread = notifications.filter((n) => !n.read).length;
 
+  const enabledCategoriesCount = Object.values(preferences?.categories ?? {}).filter(Boolean)
+    .length;
+
+  const quietHoursEnabled = Boolean(preferences?.quietHours?.enabled);
+  const inQuietHours = useMemo(() => {
+    if (!quietHoursEnabled) return false;
+    return isNowInQuietHours(preferences.quietHours.start, preferences.quietHours.end);
+  }, [quietHoursEnabled, preferences?.quietHours?.start, preferences?.quietHours?.end]);
+
+  // PUBLIC_INTERFACE
+  const setCategoryEnabled = (categoryKey, enabled) => {
+    /** Enable/disable a single notification category. */
+    onUpdatePreferences({
+      categories: { [categoryKey]: enabled },
+    });
+  };
+
+  // PUBLIC_INTERFACE
+  const setAllCategories = (enabled) => {
+    /** Enable/disable all categories at once. */
+    const patch = {};
+    for (const c of categories) patch[c.key] = enabled;
+    onUpdatePreferences({ categories: patch });
+  };
+
+  // PUBLIC_INTERFACE
+  const setChannelEnabled = (channelKey, enabled) => {
+    /** Enable/disable a notification channel preference. */
+    onUpdatePreferences({
+      channels: { [channelKey]: enabled },
+    });
+  };
+
   return (
-    <div className="card">
-      <div className="cardHeader">
-        <div>
-          <h2>Notifications</h2>
-          <p>Mark updates as read/unread</p>
-        </div>
-        <span className={`pill ${unread > 0 ? "pillRed" : "pillGreen"}`}>
-          {unread} unread
-        </span>
-      </div>
-      <div className="cardBody">
-        {notifications.length === 0 ? (
-          <div className="emptyState">No notifications match your filters.</div>
-        ) : (
-          <div className="list" aria-label="Notifications list">
-            {notifications.map((n) => (
-              <div key={n.id} className="listItem">
+    <div className="grid">
+      <div className="grid2">
+        <div className="card">
+          <div className="cardHeader">
+            <div>
+              <h2>Notification preferences</h2>
+              <p>Choose what you want to be notified about</p>
+            </div>
+            <span className="pill pillBlue">{enabledCategoriesCount} categories on</span>
+          </div>
+
+          <div className="cardBody">
+            <div className="grid" style={{ gap: 10 }}>
+              <div className="split" style={{ alignItems: "center" }}>
                 <div>
-                  <strong>
-                    {n.title}{" "}
-                    {!n.read ? (
-                      <span className="pill pillRed" style={{ marginLeft: 8 }}>
-                        Unread
-                      </span>
-                    ) : (
-                      <span className="pill" style={{ marginLeft: 8 }}>
-                        Read
-                      </span>
-                    )}
-                  </strong>
-                  <p>
-                    {n.body}
-                    <span className="muted"> · {formatShortDate(n.time)}</span>
-                  </p>
+                  <strong style={{ fontSize: 13 }}>Categories</strong>
+                  <div className="muted">Disable categories to hide/suppress them in the list.</div>
                 </div>
-                <div className="rowActions">
-                  <button
-                    className="btn btnPrimary"
-                    onClick={() => onMarkRead(n.id, !n.read)}
-                    aria-label={`Toggle read state for ${n.title}`}
-                  >
-                    Mark {n.read ? "unread" : "read"}
+
+                <div className="rowActions" style={{ justifyContent: "flex-end" }}>
+                  <button className="btn" onClick={() => setAllCategories(true)} aria-label="Enable all notification categories">
+                    Enable all
+                  </button>
+                  <button className="btn" onClick={() => setAllCategories(false)} aria-label="Disable all notification categories">
+                    Disable all
                   </button>
                 </div>
               </div>
-            ))}
+
+              <div className="list" aria-label="Notification categories list">
+                {categories.map((c) => {
+                  const enabled = Boolean(preferences?.categories?.[c.key] ?? true);
+                  const counts = categoryCounts?.[c.key] ?? { total: 0, unread: 0 };
+
+                  return (
+                    <div key={c.key} className="listItem" style={{ alignItems: "center" }}>
+                      <div style={{ minWidth: 0 }}>
+                        <strong>
+                          {c.label}{" "}
+                          <span className="pill" style={{ marginLeft: 8 }}>
+                            {counts.total} total
+                          </span>
+                          {counts.unread > 0 ? (
+                            <span className="pill pillRed" style={{ marginLeft: 8 }}>
+                              {counts.unread} unread
+                            </span>
+                          ) : null}
+                        </strong>
+                        <p>{c.desc}</p>
+                      </div>
+
+                      <div className="rowActions" style={{ alignItems: "center" }}>
+                        <label className="pill" style={{ cursor: "pointer", userSelect: "none" }}>
+                          <input
+                            type="checkbox"
+                            checked={enabled}
+                            onChange={(e) => setCategoryEnabled(c.key, e.target.checked)}
+                            aria-label={`Toggle ${c.label} notifications`}
+                            style={{ marginRight: 8 }}
+                          />
+                          {enabled ? "Enabled" : "Disabled"}
+                        </label>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              <div style={{ marginTop: 6 }} className="emptyState">
+                <strong>Note:</strong> This dashboard is mock-only. Preferences affect what you see here and persist with “Persist: On”.
+              </div>
+            </div>
           </div>
-        )}
+        </div>
+
+        <div className="card">
+          <div className="cardHeader">
+            <div>
+              <h2>Delivery</h2>
+              <p>Channel preferences (mock)</p>
+            </div>
+            <span className={`pill ${inQuietHours ? "pillAmber" : "pillGreen"}`}>
+              {quietHoursEnabled ? (inQuietHours ? "Quiet hours active" : "Quiet hours set") : "No quiet hours"}
+            </span>
+          </div>
+
+          <div className="cardBody">
+            <div className="list" aria-label="Notification delivery settings">
+              <div className="listItem" style={{ alignItems: "center" }}>
+                <div>
+                  <strong>In-app</strong>
+                  <p>Show notifications inside the dashboard.</p>
+                </div>
+                <label className="pill" style={{ cursor: "pointer", userSelect: "none" }}>
+                  <input
+                    type="checkbox"
+                    checked={Boolean(preferences?.channels?.inApp ?? true)}
+                    onChange={(e) => setChannelEnabled("inApp", e.target.checked)}
+                    aria-label="Toggle in-app notifications"
+                    style={{ marginRight: 8 }}
+                  />
+                  {preferences?.channels?.inApp ? "On" : "Off"}
+                </label>
+              </div>
+
+              <div className="listItem" style={{ alignItems: "center" }}>
+                <div>
+                  <strong>Email</strong>
+                  <p>Receive a copy by email (mock-only toggle).</p>
+                </div>
+                <label className="pill" style={{ cursor: "pointer", userSelect: "none" }}>
+                  <input
+                    type="checkbox"
+                    checked={Boolean(preferences?.channels?.email ?? false)}
+                    onChange={(e) => setChannelEnabled("email", e.target.checked)}
+                    aria-label="Toggle email notifications"
+                    style={{ marginRight: 8 }}
+                  />
+                  {preferences?.channels?.email ? "On" : "Off"}
+                </label>
+              </div>
+
+              <div className="listItem" style={{ alignItems: "center" }}>
+                <div>
+                  <strong>SMS</strong>
+                  <p>Text alerts (mock-only toggle).</p>
+                </div>
+                <label className="pill" style={{ cursor: "pointer", userSelect: "none" }}>
+                  <input
+                    type="checkbox"
+                    checked={Boolean(preferences?.channels?.sms ?? false)}
+                    onChange={(e) => setChannelEnabled("sms", e.target.checked)}
+                    aria-label="Toggle SMS notifications"
+                    style={{ marginRight: 8 }}
+                  />
+                  {preferences?.channels?.sms ? "On" : "Off"}
+                </label>
+              </div>
+            </div>
+
+            <div className="card" style={{ background: "rgba(255,255,255,0.70)", marginTop: 12 }}>
+              <div className="cardHeader">
+                <div>
+                  <h2>Quiet hours</h2>
+                  <p>Mute notification delivery in a time window (mock behavior)</p>
+                </div>
+              </div>
+              <div className="cardBody">
+                <div className="inputRow" aria-label="Quiet hours controls">
+                  <label className="pill" style={{ cursor: "pointer", userSelect: "none" }}>
+                    <input
+                      type="checkbox"
+                      checked={Boolean(preferences?.quietHours?.enabled ?? false)}
+                      onChange={(e) =>
+                        onUpdatePreferences({
+                          quietHours: { enabled: e.target.checked },
+                        })
+                      }
+                      aria-label="Enable quiet hours"
+                      style={{ marginRight: 8 }}
+                    />
+                    Enabled
+                  </label>
+
+                  <label className="muted" htmlFor="qhStart">
+                    Start
+                  </label>
+                  <input
+                    id="qhStart"
+                    className="input"
+                    type="time"
+                    value={String(preferences?.quietHours?.start ?? "22:00")}
+                    onChange={(e) =>
+                      onUpdatePreferences({
+                        quietHours: { start: e.target.value },
+                      })
+                    }
+                    aria-label="Quiet hours start time"
+                    disabled={!Boolean(preferences?.quietHours?.enabled)}
+                  />
+
+                  <label className="muted" htmlFor="qhEnd">
+                    End
+                  </label>
+                  <input
+                    id="qhEnd"
+                    className="input"
+                    type="time"
+                    value={String(preferences?.quietHours?.end ?? "07:00")}
+                    onChange={(e) =>
+                      onUpdatePreferences({
+                        quietHours: { end: e.target.value },
+                      })
+                    }
+                    aria-label="Quiet hours end time"
+                    disabled={!Boolean(preferences?.quietHours?.enabled)}
+                  />
+                </div>
+
+                <div className="muted" style={{ marginTop: 10 }}>
+                  When quiet hours are enabled, this panel indicates whether you're currently inside the quiet window. (This demo does not actually schedule pushes/emails.)
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="card">
+        <div className="cardHeader">
+          <div>
+            <h2>Notifications</h2>
+            <p>Mark updates as read/unread</p>
+          </div>
+          <span className={`pill ${unread > 0 ? "pillRed" : "pillGreen"}`}>{unread} unread</span>
+        </div>
+        <div className="cardBody">
+          {notifications.length === 0 ? (
+            <div className="emptyState">
+              No notifications match your filters or enabled categories.
+              <div className="muted" style={{ marginTop: 8 }}>
+                Tip: turn categories back on in preferences above.
+              </div>
+            </div>
+          ) : (
+            <div className="list" aria-label="Notifications list">
+              {notifications.map((n) => (
+                <div key={n.id} className="listItem">
+                  <div style={{ minWidth: 0 }}>
+                    <strong>
+                      {n.title}{" "}
+                      <span className="pill pillBlue" style={{ marginLeft: 8 }}>
+                        {String(n._category ?? normalizeNotificationCategory(n.kind))}
+                      </span>
+                      {!n.read ? (
+                        <span className="pill pillRed" style={{ marginLeft: 8 }}>
+                          Unread
+                        </span>
+                      ) : (
+                        <span className="pill" style={{ marginLeft: 8 }}>
+                          Read
+                        </span>
+                      )}
+                    </strong>
+                    <p>
+                      {n.body}
+                      <span className="muted"> · {formatShortDate(n.time)}</span>
+                    </p>
+                  </div>
+                  <div className="rowActions">
+                    <button
+                      className="btn btnPrimary"
+                      onClick={() => onMarkRead(n.id, !n.read)}
+                      aria-label={`Toggle read state for ${n.title}`}
+                    >
+                      Mark {n.read ? "unread" : "read"}
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div className="muted" style={{ marginTop: 10 }}>
+            Note: Preferences and read/unread state persist when “Persist” is On.
+          </div>
+        </div>
       </div>
     </div>
   );
+}
+
+function isNowInQuietHours(startHHmm, endHHmm) {
+  const parse = (hhmm) => {
+    const [hh, mm] = String(hhmm ?? "").split(":").map((x) => Number(x));
+    if (!Number.isFinite(hh) || !Number.isFinite(mm)) return null;
+    return hh * 60 + mm;
+  };
+
+  const start = parse(startHHmm);
+  const end = parse(endHHmm);
+  if (start == null || end == null) return false;
+
+  const now = new Date();
+  const nowMinutes = now.getHours() * 60 + now.getMinutes();
+
+  // Same-day window
+  if (start === end) return true; // full-day mute
+  if (start < end) return nowMinutes >= start && nowMinutes < end;
+
+  // Overnight window (e.g., 22:00 -> 07:00)
+  return nowMinutes >= start || nowMinutes < end;
 }
 
 function toDateInputValue(isoString) {
