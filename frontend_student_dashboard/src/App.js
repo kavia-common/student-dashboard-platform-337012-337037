@@ -9,6 +9,7 @@ import {
   formatShortDate,
   includesQuery,
 } from "./utils/dashboard";
+import { downloadCsv } from "./utils/csv";
 import {
   buildNumericTrendSeries,
   buildWeeklySeriesFromDates,
@@ -1152,6 +1153,41 @@ function AssignmentsPanel({
     close();
   };
 
+  // PUBLIC_INTERFACE
+  const handleExportCsv = () => {
+    /** Export the currently shown (already filtered) assignments to CSV. */
+    const headers = [
+      "Assignment",
+      "Class Code",
+      "Class Name",
+      "Due (ISO)",
+      "Due (Formatted)",
+      "Status",
+      "Points",
+    ];
+
+    const rows = assignments.map((a) => {
+      const cls = classesById.get(a.classId);
+      return [
+        a.title,
+        cls?.code ?? "",
+        cls?.name ?? "",
+        a.dueDate,
+        formatDateTime(a.dueDate),
+        a.status,
+        a.points,
+      ];
+    });
+
+    // Include a short timestamp to make repeat downloads easy to distinguish.
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
+    downloadCsv({
+      filename: `assignments-${stamp}.csv`,
+      headers,
+      rows,
+    });
+  };
+
   return (
     <div className="card">
       <div className="cardHeader">
@@ -1161,6 +1197,14 @@ function AssignmentsPanel({
         </div>
         <div className="rowActions">
           <span className="pill">{assignments.length} shown</span>
+          <button
+            className="btn"
+            onClick={handleExportCsv}
+            aria-label="Export assignments as CSV"
+            title="Export the currently shown assignments"
+          >
+            Export CSV
+          </button>
           <button className="btn btnPrimary" onClick={openCreate} aria-label="Create assignment">
             + New assignment
           </button>
@@ -1422,6 +1466,43 @@ function GradesPanel({ grades, classesById }) {
     return Math.round(percents.reduce((a, b) => a + b, 0) / percents.length);
   }, [grades]);
 
+  // PUBLIC_INTERFACE
+  const handleExportCsv = () => {
+    /** Export the currently shown (already filtered) grades to CSV. */
+    const headers = [
+      "Item",
+      "Class Code",
+      "Class Name",
+      "Date (ISO)",
+      "Date (Formatted)",
+      "Score",
+      "Out Of",
+      "Percent",
+    ];
+
+    const rows = grades.map((g) => {
+      const cls = classesById.get(g.classId);
+      const pct = calcGradePercent(g.score, g.outOf);
+      return [
+        g.item,
+        cls?.code ?? "",
+        cls?.name ?? "",
+        g.date,
+        formatShortDate(g.date),
+        g.score,
+        g.outOf,
+        pct,
+      ];
+    });
+
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
+    downloadCsv({
+      filename: `grades-${stamp}.csv`,
+      headers,
+      rows,
+    });
+  };
+
   return (
     <div className="grid">
       <div className="card">
@@ -1430,7 +1511,18 @@ function GradesPanel({ grades, classesById }) {
             <h2>Grades</h2>
             <p>Recent graded items</p>
           </div>
-          <span className="pill pillGreen">Avg {average}%</span>
+
+          <div className="rowActions">
+            <span className="pill pillGreen">Avg {average}%</span>
+            <button
+              className="btn"
+              onClick={handleExportCsv}
+              aria-label="Export grades as CSV"
+              title="Export the currently shown grades"
+            >
+              Export CSV
+            </button>
+          </div>
         </div>
         <div className="cardBody">
           {grades.length === 0 ? (
