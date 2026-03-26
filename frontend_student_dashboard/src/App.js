@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import "./App.css";
 import { getDefaultDashboardData } from "./data/mockData";
 import { loadFromStorage, saveToStorage } from "./utils/storage";
+import { applyTheme, loadInitialTheme, toggleTheme } from "./utils/theme";
 import {
   assignmentStatusPill,
   calcGradePercent,
@@ -86,6 +87,10 @@ function App() {
   const [activeSection, setActiveSection] = useState("profile");
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
+  // Theme is always persisted independently (even when "Persist" is off),
+  // matching typical user expectations. This uses the same defensive storage helper.
+  const [theme, setTheme] = useState(() => loadInitialTheme());
+
   const [persistEnabled, setPersistEnabled] = useState(
     loadFromStorage("persist_enabled", true)
   );
@@ -129,6 +134,11 @@ function App() {
   const [notificationFilter, setNotificationFilter] = useState("all"); // all|unread|read
   const [notificationCategoryFilter, setNotificationCategoryFilter] =
     useState("all"); // all|assignments|grades|classes|calendar|system
+
+  // Apply theme to the document and persist it.
+  useEffect(() => {
+    applyTheme(theme, { persist: true });
+  }, [theme]);
 
   // Persist preference and data if enabled.
   useEffect(() => {
@@ -585,6 +595,15 @@ function App() {
             >
               🔔
               {unreadCount > 0 ? <span className="badgeDot" aria-hidden="true" /> : null}
+            </button>
+
+            <button
+              className="badgeBtn"
+              onClick={() => setTheme((t) => toggleTheme(t))}
+              aria-label="Toggle dark mode"
+              title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+            >
+              {theme === "dark" ? "🌙" : "☀️"}
             </button>
 
             <button className="badgeBtn" onClick={resetToMockData} aria-label="Reset mock data">
