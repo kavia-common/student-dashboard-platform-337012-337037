@@ -180,6 +180,46 @@ function App() {
   };
 
   // PUBLIC_INTERFACE
+  const createAssignment = (draft) => {
+    /** Creates an assignment and adds it to dashboard state (persists via existing state persistence). */
+    const safeId =
+      (typeof crypto !== "undefined" && crypto.randomUUID && crypto.randomUUID()) ||
+      `a_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+
+    const nextAssignment = {
+      id: safeId,
+      classId: draft.classId,
+      title: draft.title,
+      dueDate: draft.dueDate,
+      status: draft.status,
+      points: draft.points,
+    };
+
+    setData((prev) => ({
+      ...prev,
+      assignments: [nextAssignment, ...prev.assignments],
+    }));
+  };
+
+  // PUBLIC_INTERFACE
+  const updateAssignment = (id, patch) => {
+    /** Updates an existing assignment by id. */
+    setData((prev) => ({
+      ...prev,
+      assignments: prev.assignments.map((a) => (a.id === id ? { ...a, ...patch } : a)),
+    }));
+  };
+
+  // PUBLIC_INTERFACE
+  const deleteAssignment = (id) => {
+    /** Deletes an assignment by id. */
+    setData((prev) => ({
+      ...prev,
+      assignments: prev.assignments.filter((a) => a.id !== id),
+    }));
+  };
+
+  // PUBLIC_INTERFACE
   const addCalendarEvent = (event) => {
     /** Adds a calendar event to the dashboard state (and persists if enabled). */
     setData((prev) => ({
@@ -511,8 +551,12 @@ function App() {
             {activeSection === "assignments" ? (
               <AssignmentsPanel
                 assignments={filteredAssignments}
+                classes={data.classes}
                 classesById={classesById}
                 onToggleStatus={toggleAssignmentStatus}
+                onCreate={createAssignment}
+                onUpdate={updateAssignment}
+                onDelete={deleteAssignment}
               />
             ) : null}
 
@@ -905,7 +949,51 @@ function ClassesPanel({ classes }) {
   );
 }
 
-function AssignmentsPanel({ assignments, classesById, onToggleStatus }) {
+function AssignmentsPanel({
+  assignments,
+  classes,
+  classesById,
+  onToggleStatus,
+  onCreate,
+  onUpdate,
+  onDelete,
+}) {
+  const [editOpen, setEditOpen] = useState(false);
+  const [editing, setEditing] = useState(null); // assignment or null
+
+  const openCreate = () => {
+    setEditing(null);
+    setEditOpen(true);
+  };
+
+  const openEdit = (assignment) => {
+    setEditing(assignment);
+    setEditOpen(true);
+  };
+
+  const close = () => {
+    setEditOpen(false);
+    setEditing(null);
+  };
+
+  // PUBLIC_INTERFACE
+  const handleSubmit = (draft) => {
+    /** Create or update assignment based on whether an existing assignment is being edited. */
+    if (editing) {
+      onUpdate(editing.id, draft);
+    } else {
+      onCreate(draft);
+    }
+    close();
+  };
+
+  // PUBLIC_INTERFACE
+  const handleDelete = (id) => {
+    /** Deletes an assignment and closes modal if needed. */
+    onDelete(id);
+    close();
+  };
+
   return (
     <div className="card">
       <div className="cardHeader">
@@ -913,11 +1001,18 @@ function AssignmentsPanel({ assignments, classesById, onToggleStatus }) {
           <h2>Assignments</h2>
           <p>Track deadlines and progress</p>
         </div>
-        <span className="pill">{assignments.length} shown</span>
+        <div className="rowActions">
+          <span className="pill">{assignments.length} shown</span>
+          <button className="btn btnPrimary" onClick={openCreate} aria-label="Create assignment">
+            + New assignment
+          </button>
+        </div>
       </div>
       <div className="cardBody">
         {assignments.length === 0 ? (
-          <div className="emptyState">No assignments match your filters.</div>
+          <div className="emptyState">
+            No assignments match your filters. Create one to get started.
+          </div>
         ) : (
           <table className="table" aria-label="Assignments table">
             <thead>
@@ -949,6 +1044,13 @@ function AssignmentsPanel({ assignments, classesById, onToggleStatus }) {
                     <td>
                       <div className="rowActions">
                         <button
+                          className="btn"
+                          onClick={() => openEdit(a)}
+                          aria-label={`Edit assignment ${a.title}`}
+                        >
+                          Edit
+                        </button>
+                        <button
                           className="btn btnPrimary"
                           onClick={() => onToggleStatus(a.id)}
                           aria-label={`Toggle status for ${a.title}`}
@@ -963,6 +1065,254 @@ function AssignmentsPanel({ assignments, classesById, onToggleStatus }) {
             </tbody>
           </table>
         )}
+
+        <div className="muted" style={{ marginTop: 10 }}>
+          Note: Creating/editing assignments updates dashboard state. If “Persist” is On, changes are
+          saved to localStorage and will remain after refresh.
+        </div>
+      </div>
+
+      {editOpen ? (
+        <AssignmentEditorModal
+          assignment={editing}
+          classes={classes}
+          onCancel={close}
+          onSubmit={handleSubmit}
+          onDelete={editing ? () => handleDelete(editing.id) : null}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+function AssignmentEditorModal({ assignment, classes, onCancel, onSubmit, onDelete }) {
+  const isEdit = Boolean(assignment);
+
+  const initial = useMemo(() => {
+    const now = new Date();
+    now.setMinutes(0, 0, 0);
+
+    const fallbackDue = (() => {
+      const d = new Date();
+      d.setDate(d.getDate() + 3);
+      d.setHours(23, 59, 0, 0);
+      return d.toISOString();
+    })();
+
+    return {
+      title: String(assignment?.title ?? ""),
+      classId: String(assignment?.classId ?? (classes[0]?.id ?? "")),
+      dueDate: String(assignment?.dueDate ?? fallbackDue),
+      status: String(assignment?.status ?? "Not Started"),
+      points: Number(assignment?.points ?? 10),
+    };
+  }, [assignment, classes]);
+
+  const [title, setTitle] = useState(initial.title);
+  const [classId, setClassId] = useState(initial.classId);
+  const [date, setDate] = useState(() => toDateInputValue(initial.dueDate));
+  const [time, setTime] = useState(() => toTimeInputValue(initial.dueDate, "23:59"));
+  const [status, setStatus] = useState(initial.status);
+  const [points, setPoints] = useState(String(initial.points));
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    if (error) setError("");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [title, classId, date, time, status, points]);
+
+  const buildDueIso = () => {
+    const [hh, mm] = String(time).split(":").map((x) => Number(x));
+    const d = new Date(String(date));
+    d.setHours(Number.isFinite(hh) ? hh : 23, Number.isFinite(mm) ? mm : 59, 0, 0);
+    return d.toISOString();
+  };
+
+  const submit = (e) => {
+    e.preventDefault();
+
+    const t = String(title || "").trim();
+    if (t.length < 2) {
+      setError("Please provide an assignment title (at least 2 characters).");
+      return;
+    }
+
+    if (!classId) {
+      setError("Please select a class.");
+      return;
+    }
+
+    const dueIso = buildDueIso();
+    if (!Number.isFinite(new Date(dueIso).getTime())) {
+      setError("Please choose a valid due date/time.");
+      return;
+    }
+
+    const pts = Number(points);
+    if (!Number.isFinite(pts) || pts <= 0) {
+      setError("Points must be a positive number.");
+      return;
+    }
+
+    onSubmit({
+      title: t,
+      classId,
+      dueDate: dueIso,
+      status,
+      points: Math.round(pts),
+    });
+  };
+
+  return (
+    <div
+      className="modalOverlay"
+      role="dialog"
+      aria-modal="true"
+      aria-label={isEdit ? "Edit assignment modal" : "Create assignment modal"}
+    >
+      <div className="modalCard">
+        <div className="modalHeader">
+          <div>
+            <h3 style={{ margin: 0, fontSize: 14 }}>
+              {isEdit ? "Edit assignment" : "Create assignment"}
+            </h3>
+            <p style={{ margin: "6px 0 0 0" }} className="muted">
+              {isEdit
+                ? "Update assignment details. Changes apply immediately."
+                : "Add a new assignment to your dashboard."}
+            </p>
+          </div>
+          <button className="btn" onClick={onCancel} aria-label="Close assignment editor modal">
+            ✕
+          </button>
+        </div>
+
+        <form onSubmit={submit} className="modalBody">
+          <div className="grid2">
+            <label className="modalField">
+              <span className="muted">Title</span>
+              <input
+                className="input"
+                value={title}
+                onChange={(e) => setTitle(e.target.value)}
+                placeholder="e.g., Binary Trees Worksheet"
+                aria-label="Assignment title"
+                autoFocus
+              />
+            </label>
+
+            <label className="modalField">
+              <span className="muted">Class</span>
+              <select
+                className="select"
+                value={classId}
+                onChange={(e) => setClassId(e.target.value)}
+                aria-label="Assignment class"
+              >
+                {classes.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.code} · {c.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+
+          <div className="grid2" style={{ marginTop: 10 }}>
+            <label className="modalField">
+              <span className="muted">Due date</span>
+              <input
+                className="input"
+                type="date"
+                value={date}
+                onChange={(e) => setDate(e.target.value)}
+                aria-label="Assignment due date"
+              />
+            </label>
+
+            <label className="modalField">
+              <span className="muted">Due time</span>
+              <input
+                className="input"
+                type="time"
+                value={time}
+                onChange={(e) => setTime(e.target.value)}
+                aria-label="Assignment due time"
+              />
+            </label>
+          </div>
+
+          <div className="grid2" style={{ marginTop: 10 }}>
+            <label className="modalField">
+              <span className="muted">Status</span>
+              <select
+                className="select"
+                value={status}
+                onChange={(e) => setStatus(e.target.value)}
+                aria-label="Assignment status"
+              >
+                <option>Not Started</option>
+                <option>In Progress</option>
+                <option>Submitted</option>
+              </select>
+            </label>
+
+            <label className="modalField">
+              <span className="muted">Points</span>
+              <input
+                className="input"
+                type="number"
+                min="1"
+                step="1"
+                value={points}
+                onChange={(e) => setPoints(e.target.value)}
+                aria-label="Assignment points"
+              />
+            </label>
+          </div>
+
+          {error ? (
+            <div
+              className="emptyState"
+              style={{ marginTop: 10, borderColor: "rgba(239,68,68,0.35)" }}
+            >
+              {error}
+            </div>
+          ) : null}
+
+          <div className="modalActions" style={{ justifyContent: "space-between" }}>
+            <div style={{ display: "flex", gap: 10 }}>
+              {onDelete ? (
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={onDelete}
+                  aria-label="Delete assignment"
+                  style={{
+                    borderColor: "rgba(239,68,68,0.35)",
+                    background: "rgba(239,68,68,0.06)",
+                  }}
+                >
+                  Delete
+                </button>
+              ) : null}
+            </div>
+
+            <div style={{ display: "flex", gap: 10 }}>
+              <button
+                type="button"
+                className="btn"
+                onClick={onCancel}
+                aria-label="Cancel assignment editor"
+              >
+                Cancel
+              </button>
+              <button type="submit" className="btn btnPrimary" aria-label="Save assignment">
+                {isEdit ? "Save changes" : "Create assignment"}
+              </button>
+            </div>
+          </div>
+        </form>
       </div>
     </div>
   );
@@ -1595,6 +1945,22 @@ function NotificationsPanel({ notifications, onMarkRead }) {
       </div>
     </div>
   );
+}
+
+function toDateInputValue(isoString) {
+  const d = new Date(isoString);
+  if (!Number.isFinite(d.getTime())) return new Date().toISOString().slice(0, 10);
+  const local = new Date(d);
+  local.setMinutes(local.getMinutes() - local.getTimezoneOffset());
+  return local.toISOString().slice(0, 10);
+}
+
+function toTimeInputValue(isoString, fallback = "23:59") {
+  const d = new Date(isoString);
+  if (!Number.isFinite(d.getTime())) return fallback;
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mm = String(d.getMinutes()).padStart(2, "0");
+  return `${hh}:${mm}`;
 }
 
 export default App;
